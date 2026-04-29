@@ -195,6 +195,8 @@ class PhoneAgent:
             action = finish(message=response.action)
 
         if self.agent_config.verbose:
+            if response.thinking and not response.thinking_displayed:
+                print(response.thinking)
             # Print thinking process
             print("-" * 50)
             print(f"🎯 {msgs['action']}:")

@@ -345,6 +345,13 @@ def parse_action(response: str) -> dict[str, Any]:
     print(f"Parsing action: {response}")
     try:
         response = response.strip()
+        response = response.replace("<answer>", "").replace("</answer>", "").strip()
+
+        if response.startswith("```"):
+            response = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", response)
+            response = re.sub(r"\s*```$", "", response)
+            response = response.strip()
+
         if response.startswith('do(action="Type"') or response.startswith(
             'do(action="Type_Name"'
         ):

@@ -32,6 +32,7 @@ class ModelResponse:
     thinking: str
     action: str
     raw_content: str
+    thinking_displayed: bool = False
     # Performance metrics
     time_to_first_token: float | None = None  # Time to first token (seconds)
     time_to_thinking_end: float | None = None  # Time to thinking end (seconds)
@@ -68,82 +69,136 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
 
-        stream = self.client.chat.completions.create(
+        # Some providers (e.g. Google Gemini's OpenAI-compatible endpoint)
+        # reject unknown fields like `frequency_penalty`. Only include it
+        # when explicitly non-zero to maximize compatibility.
+        create_kwargs: dict[str, Any] = dict(
             messages=messages,
             model=self.config.model_name,
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,
             top_p=self.config.top_p,
-            frequency_penalty=self.config.frequency_penalty,
             extra_body=self.config.extra_body,
             stream=True,
         )
+        if self.config.frequency_penalty:
+            create_kwargs["frequency_penalty"] = self.config.frequency_penalty
+
+        # Gemini's compat endpoint also doesn't accept `frequency_penalty`
+        # even when 0, so we further drop it for *.googleapis.com hosts.
+        if "googleapis.com" in (self.config.base_url or ""):
+            create_kwargs.pop("frequency_penalty", None)
+
+        stream = self.client.chat.completions.create(**create_kwargs)
 
         raw_content = ""
+        reasoning_content = ""
         buffer = ""  # Buffer to hold content that might be part of a marker
-        action_markers = ["finish(message=", "do(action="]
+        action_markers = ["<answer>", "finish(message=", "do(action="]
+        stream_markers = action_markers + ["<think>", "</think>", "</answer>"]
         in_action_phase = False  # Track if we've entered the action phase
         first_token_received = False
+        thinking_displayed = False
 
         for chunk in stream:
             if len(chunk.choices) == 0:
                 continue
-            if chunk.choices[0].delta.content is not None:
-                content = chunk.choices[0].delta.content
-                raw_content += content
+            delta = chunk.choices[0].delta
+
+            reasoning_delta = self._extract_delta_text(delta, "reasoning_content")
+            if reasoning_delta is None:
+                reasoning_delta = self._extract_delta_text(delta, "reasoning")
+
+            if reasoning_delta:
+                reasoning_content += reasoning_delta
 
                 # Record time to first token
                 if not first_token_received:
                     time_to_first_token = time.time() - start_time
                     first_token_received = True
 
-                if in_action_phase:
-                    # Already in action phase, just accumulate content without printing
-                    continue
+                cleaned_reasoning = self._strip_response_tags(reasoning_delta)
+                if cleaned_reasoning:
+                    print(cleaned_reasoning, end="", flush=True)
+                    thinking_displayed = True
 
-                buffer += content
+            content = self._extract_delta_text(delta, "content")
+            if content is None:
+                continue
 
-                # Check if any marker is fully present in buffer
-                marker_found = False
-                for marker in action_markers:
-                    if marker in buffer:
-                        # Marker found, print everything before it
-                        thinking_part = buffer.split(marker, 1)[0]
-                        print(thinking_part, end="", flush=True)
-                        print()  # Print newline after thinking is complete
-                        in_action_phase = True
-                        marker_found = True
+            raw_content += content
 
-                        # Record time to thinking end
-                        if time_to_thinking_end is None:
-                            time_to_thinking_end = time.time() - start_time
+            # Record time to first token
+            if not first_token_received:
+                time_to_first_token = time.time() - start_time
+                first_token_received = True
 
+            if reasoning_content:
+                if time_to_thinking_end is None:
+                    time_to_thinking_end = time.time() - start_time
+                continue
+
+            if in_action_phase:
+                # Already in action phase, just accumulate content without printing
+                continue
+
+            buffer += content
+
+            # Check if any marker is fully present in buffer
+            marker_found = False
+            for marker in action_markers:
+                if marker in buffer:
+                    # Marker found, print everything before it
+                    thinking_part = buffer.split(marker, 1)[0]
+                    cleaned_thinking = self._strip_response_tags(thinking_part)
+                    if cleaned_thinking:
+                        print(cleaned_thinking, end="", flush=True)
+                        thinking_displayed = True
+                    print()  # Print newline after thinking is complete
+                    in_action_phase = True
+                    marker_found = True
+
+                    # Record time to thinking end
+                    if time_to_thinking_end is None:
+                        time_to_thinking_end = time.time() - start_time
+
+                    break
+
+            if marker_found:
+                continue  # Continue to collect remaining content
+
+            # Check if buffer ends with a prefix of any marker
+            # If so, don't print yet (wait for more content)
+            is_potential_marker = False
+            for marker in stream_markers:
+                for i in range(1, len(marker)):
+                    if buffer.endswith(marker[:i]):
+                        is_potential_marker = True
                         break
+                if is_potential_marker:
+                    break
 
-                if marker_found:
-                    continue  # Continue to collect remaining content
+            if not is_potential_marker:
+                # Safe to print the buffer after removing control tags
+                cleaned_buffer = self._strip_response_tags(buffer)
+                if cleaned_buffer:
+                    print(cleaned_buffer, end="", flush=True)
+                    thinking_displayed = True
+                buffer = ""
 
-                # Check if buffer ends with a prefix of any marker
-                # If so, don't print yet (wait for more content)
-                is_potential_marker = False
-                for marker in action_markers:
-                    for i in range(1, len(marker)):
-                        if buffer.endswith(marker[:i]):
-                            is_potential_marker = True
-                            break
-                    if is_potential_marker:
-                        break
-
-                if not is_potential_marker:
-                    # Safe to print the buffer
-                    print(buffer, end="", flush=True)
-                    buffer = ""
+        if buffer and not reasoning_content and not in_action_phase:
+            cleaned_buffer = self._strip_response_tags(buffer)
+            if cleaned_buffer:
+                print(cleaned_buffer, end="", flush=True)
+                thinking_displayed = True
 
         # Calculate total time
         total_time = time.time() - start_time
 
         # Parse thinking and action from response
         thinking, action = self._parse_response(raw_content)
+        if not thinking.strip() and reasoning_content.strip():
+            thinking = self._strip_response_tags(reasoning_content).strip()
 
         # Print performance metrics
         lang = self.config.lang
@@ -168,10 +223,41 @@ class ModelClient:
             thinking=thinking,
             action=action,
             raw_content=raw_content,
+            thinking_displayed=thinking_displayed,
             time_to_first_token=time_to_first_token,
             time_to_thinking_end=time_to_thinking_end,
             total_time=total_time,
         )
+
+    @staticmethod
+    def _strip_response_tags(text: str) -> str:
+        """Remove control tags from model output before displaying or storing it."""
+        return (
+            text.replace("<think>", "")
+            .replace("</think>", "")
+            .replace("<answer>", "")
+            .replace("</answer>", "")
+        )
+
+    @staticmethod
+    def _extract_delta_text(delta: Any, field_name: str) -> str | None:
+        """Best-effort extraction for standard and provider-specific stream fields."""
+        value = getattr(delta, field_name, None)
+        if value is not None:
+            return value
+
+        model_extra = getattr(delta, "model_extra", None)
+        if isinstance(model_extra, dict):
+            value = model_extra.get(field_name)
+            if value is not None:
+                return value
+
+        if isinstance(delta, dict):
+            value = delta.get(field_name)
+            if value is not None:
+                return value
+
+        return None
 
     def _parse_response(self, content: str) -> tuple[str, str]:
         """
@@ -191,6 +277,13 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
+        # Rule 0: Prefer explicit XML-style answer blocks when present
+        if "<answer>" in content:
+            parts = content.split("<answer>", 1)
+            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
+            action = parts[1].replace("</answer>", "").strip()
+            return thinking, action
+
         # Rule 1: Check for finish(message=
         if "finish(message=" in content:
             parts = content.split("finish(message=", 1)
@@ -205,14 +298,7 @@ class ModelClient:
             action = "do(action=" + parts[1]
             return thinking, action
 
-        # Rule 3: Fallback to legacy XML tag parsing
-        if "<answer>" in content:
-            parts = content.split("<answer>", 1)
-            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
-            action = parts[1].replace("</answer>", "").strip()
-            return thinking, action
-
-        # Rule 4: No markers found, return content as action
+        # Rule 3: No markers found, return content as action
         return "", content
 
 
