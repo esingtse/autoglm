@@ -13,7 +13,7 @@ import os
 model_config = ModelConfig(
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
     model_name="gemini-3.5-flash",
-    api_key='AIzaSyDj2pF8dr7lYi65Lz-0aEPu2uw6dvoG_oU',
+    api_key='',
     extra_body={
         "reasoning_effort": "low",   # 关闭思考；也可 "low" / "medium" / "high"
     },
@@ -23,7 +23,7 @@ model_config = ModelConfig(
 # model_config = ModelConfig(
 #     base_url="https://calciumion-new-api.dam-test.umlife.com/v1",
 #     model_name="qwen3.7-plus",
-#     api_key='sk-7aDLF7ujs3bHz2IzAyD2VbVBjbtCUN0LuvPHs7ws6bG4Unu4',
+#     api_key='',
 #     extra_body={
 #         "reasoning_effort": "low",   # 关闭思考；也可 "low" / "medium" / "high"
 #     },
