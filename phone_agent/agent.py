@@ -2,8 +2,8 @@
 
 import json
 import traceback
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, TYPE_CHECKING
 
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import do, finish, parse_action
@@ -11,6 +11,9 @@ from phone_agent.config import get_messages, get_system_prompt
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+
+if TYPE_CHECKING:
+    from phone_agent.memory import MemoryManager
 
 
 @dataclass
@@ -67,6 +70,7 @@ class PhoneAgent:
         agent_config: AgentConfig | None = None,
         confirmation_callback: Callable[[str], bool] | None = None,
         takeover_callback: Callable[[str], None] | None = None,
+        memory_manager: "MemoryManager | None" = None,
     ):
         self.model_config = model_config or ModelConfig()
         self.agent_config = agent_config or AgentConfig()
@@ -80,6 +84,9 @@ class PhoneAgent:
 
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        self.memory_manager = memory_manager
+        self._current_task: str = ""
+        self._collected_notes: list[str] = []
 
     def run(self, task: str) -> str:
         """
@@ -93,11 +100,28 @@ class PhoneAgent:
         """
         self._context = []
         self._step_count = 0
+        self._current_task = task
+        self._collected_notes = []
+
+        # --- Memory: retrieve knowledge and inject into system prompt ---
+        effective_system_prompt = self.agent_config.system_prompt
+        if self.memory_manager:
+            knowledge = self.memory_manager.retrieve(task)
+            if knowledge:
+                effective_system_prompt = effective_system_prompt + knowledge
+                if self.agent_config.verbose:
+                    game = self.memory_manager._extract_game(task)
+                    game_str = game or "unknown"
+                    print(f"\n🧠 已加载《{game_str}》的历史经验")
+
+        # Store a copy to avoid mutating the original agent_config
+        self._effective_system_prompt = effective_system_prompt
 
         # First step with user prompt
         result = self._execute_step(task, is_first=True)
 
         if result.finished:
+            self._learn_from_result(result)
             return result.message or "Task completed"
 
         # Continue until finished or max steps reached
@@ -105,6 +129,7 @@ class PhoneAgent:
             result = self._execute_step(is_first=False)
 
             if result.finished:
+                self._learn_from_result(result)
                 return result.message or "Task completed"
 
         return "Max steps reached"
@@ -147,7 +172,7 @@ class PhoneAgent:
         # Build messages
         if is_first:
             self._context.append(
-                MessageBuilder.create_system_message(self.agent_config.system_prompt)
+                MessageBuilder.create_system_message(self._effective_system_prompt)
             )
 
             screen_info = MessageBuilder.build_screen_info(current_app)
@@ -188,7 +213,19 @@ class PhoneAgent:
 
         # Parse action from response
         try:
-            action = parse_action(response.action)
+            if not response.action.strip():
+                # Model returned empty action — wait and retry instead of crashing
+                self._empty_action_count = getattr(self, "_empty_action_count", 0) + 1
+                if self._empty_action_count > 3:
+                    # Too many empty responses, force finish
+                    action = finish(message="连续多次模型返回空动作，强制结束")
+                else:
+                    if self.agent_config.verbose:
+                        print(f"⚠️ 模型返回空动作 (第{self._empty_action_count}次)，等待重试...")
+                    action = do(action="Wait", duration="1 seconds")
+            else:
+                self._empty_action_count = 0
+                action = parse_action(response.action)
         except ValueError:
             if self.agent_config.verbose:
                 traceback.print_exc()
@@ -228,6 +265,12 @@ class PhoneAgent:
         # Check if finished
         finished = action.get("_metadata") == "finish" or result.should_finish
 
+        # Collect Note messages for memory learning and structured output
+        if action.get("action") == "Note":
+            note_msg = action.get("message", "")
+            if note_msg:
+                self._collected_notes.append(note_msg)
+
         if finished and self.agent_config.verbose:
             msgs = get_messages(self.agent_config.lang)
             print("\n" + "🎉 " + "=" * 48)
@@ -244,10 +287,42 @@ class PhoneAgent:
             message=result.message or action.get("message"),
         )
 
+    def _learn_from_result(self, result: StepResult) -> None:
+        """Extract knowledge from completed task and store via MemoryManager."""
+        if not self.memory_manager or not self._current_task:
+            return
+
+        notes_to_learn: list[str] = []
+
+        # Collect Note messages captured during execution
+        if self._collected_notes:
+            notes_to_learn.extend(self._collected_notes)
+
+        # Also include the finish message if it contains useful info
+        if result.message and result.message.strip():
+            msg = result.message.strip()
+            # Skip trivial "done" / "task completed" messages
+            if msg.lower() not in {"done", "task completed", "任务完成", "ok"}:
+                notes_to_learn.append(msg)
+
+        if notes_to_learn:
+            self.memory_manager.learn(
+                task=self._current_task,
+                notes=notes_to_learn,
+                source="auto",
+            )
+            if self.agent_config.verbose:
+                print(f"🧠 已从本次执行中学习 {len(notes_to_learn)} 条经验")
+
     @property
     def context(self) -> list[dict[str, Any]]:
         """Get the current conversation context."""
         return self._context.copy()
+
+    @property
+    def collected_notes(self) -> list[str]:
+        """Get Note messages collected during the current run."""
+        return list(self._collected_notes)
 
     @property
     def step_count(self) -> int:

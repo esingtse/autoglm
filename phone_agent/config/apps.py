@@ -185,6 +185,28 @@ APP_PACKAGES: dict[str, str] = {
     "wechat": "com.tencent.mm",
     "Whatsapp": "com.whatsapp",
     "WhatsApp": "com.whatsapp",
+
+    # Games
+    "和平精英": "com.tencent.tmgp.pubgmhd",
+    "王者荣耀": "com.tencent.tmgp.sgame",
+    "蛋仔派对": "com.tencent.tmgp.party",
+    "小小蚁国": "com.star.union.planetant",
+    "破晓的曙光": "com.tencent.tmgp.gzjw.pxdsg",
+    "完美世界：诸神之战": "com.perfectworld.wmzs",
+    "三角洲行动": "com.tencent.tmgp.dfm",
+    "原神": "com.miHoYo.Yuanshen",
+    "崩坏：星穹铁道": "com.miHoYo.hkrpg",
+    "明日方舟": "com.hypergryph.arknights",
+    "英雄联盟手游": "com.riotgames.league.wildrift",
+    "金铲铲之战": "com.tencent.jkchess",
+    "光遇": "com.netease.sky",
+    "第五人格": "com.netease.idv",
+    "梦幻西游": "com.netease.my",
+    "阴阳师": "com.netease.onmyoji",
+    "火影忍者": "com.tencent.kihan",
+    "QQ飞车": "com.tencent.tmgp.speedmobile",
+    "穿越火线：枪战王者": "com.tencent.tmgp.cf",
+    "使命召唤手游": "com.tencent.tmgp.cod",
 }
 
 

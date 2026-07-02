@@ -136,7 +136,11 @@ class ModelClient:
             if reasoning_content:
                 if time_to_thinking_end is None:
                     time_to_thinking_end = time.time() - start_time
-                continue
+                # Don't skip content processing — some models send reasoning
+                # tokens first, then regular content tokens afterwards.
+                # Only skip if there was also reasoning in this chunk (which
+                # means content is likely a duplicate/overlap with reasoning).
+                pass
 
             if in_action_phase:
                 # Already in action phase, just accumulate content without printing
@@ -197,6 +201,15 @@ class ModelClient:
 
         # Parse thinking and action from response
         thinking, action = self._parse_response(raw_content)
+
+        # Fallback: if raw_content yields no action, try reasoning_content.
+        # Gemini models often put the entire output (including answer) in
+        # reasoning_content when reasoning_effort is enabled.
+        if not action.strip() and reasoning_content.strip():
+            _, action_from_reasoning = self._parse_response(reasoning_content)
+            if action_from_reasoning.strip():
+                action = action_from_reasoning
+
         if not thinking.strip() and reasoning_content.strip():
             thinking = self._strip_response_tags(reasoning_content).strip()
 
