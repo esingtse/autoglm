@@ -1,9 +1,12 @@
-from phone_agent import PhoneAgent
+﻿from phone_agent import PhoneAgent
 from phone_agent.agent import AgentConfig
 from phone_agent.model import ModelConfig
 from phone_agent.config import get_messages
 from phone_agent.memory import MemoryManager
 from phone_agent.results import activity_summary_to_game_events
+from commonproto.pb4.proto.grpc import k2av_pb2
+from commonproto.pb4.proto.ad.ad_pb2 import GameEvent
+from utils.k2av_util import create_k2av_stub, send_k2av
 
 import json
 import os
@@ -28,7 +31,7 @@ agent = PhoneAgent(
     memory_manager=memory,
 )
 
-APP_LIST = ["和平精英", "王者荣耀", "蛋仔派对", "小小蚁国", "破晓的曙光", "完美世界：诸神之战", "三角洲行动"]
+APP_LIST = ["和平精英", "王者荣耀", "蛋仔派对", "小小蚁国", "破晓的曙光", "完美世界", "三角洲行动"]
 APP_LIST = ["王者荣耀"]
 
 TASK_HEPING = """
@@ -51,7 +54,8 @@ TASK_HEPING = """
 
 （每个活动之间空一行）
 
-输出完这条汇总 Note 之后，再执行 finish。
+输出完这条汇总 Note 之后
+最后结束游戏，回到手机桌面，再执行 finish。。
 """.strip()
 
 
@@ -59,6 +63,9 @@ TASK_HEPING = """
 msgs = get_messages("cn")
 output_dir = os.path.join(os.path.dirname(__file__), "output")
 os.makedirs(output_dir, exist_ok=True)
+
+# --- Create k2av stub once ---
+k2av_stub = create_k2av_stub(server="k2av-ag-alishh.umlife.net:31400", channel_options=[("grpc.default_authority", "k2av.ag.k8s.y.cn")])
 
 for game in APP_LIST:
     task = TASK_HEPING % game
@@ -93,6 +100,26 @@ for game in APP_LIST:
             json.dump(all_events, f, ensure_ascii=False, indent=2)
         print(f"\n💾 已保存 {len(all_events)} 条 GameEvent → {output_path}")
 
+        # --- Send to k2av ---
+        for event in all_events:
+            ge = GameEvent(
+                app_id=event.get("app_id", ""),
+                package=event.get("package", ""),
+                app_name=event.get("app_name", ""),
+                title=event.get("title", ""),
+                content=event.get("content", ""),
+                reward=event.get("reward", ""),
+               event_date=event.get("event_date", ""),
+               start_date=event.get("start_date", ""),
+               end_data=event.get("end_data", ""),
+               ts_crawl=event.get("ts_crawl", 0),
+            )
+            request = k2av_pb2.Request(topic="game_event", value=ge.SerializeToString())
+            send_k2av(k2av_stub, request)
+        print(f"📤 已发送 {len(all_events)} 条 GameEvent → k2av")
+
     # Reset Agent state
     agent.reset()
-    break  # 只跑一个游戏测试，去掉这个 break 就可以跑完整个列表
+    print(f"\n{'='*40}")
+    print(f"完成: {game}")
+    print(f"{'='*40}\n")

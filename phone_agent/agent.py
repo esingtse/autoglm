@@ -306,13 +306,13 @@ class PhoneAgent:
                 notes_to_learn.append(msg)
 
         if notes_to_learn:
-            self.memory_manager.learn(
+            learned = self.memory_manager.learn(
                 task=self._current_task,
                 notes=notes_to_learn,
                 source="auto",
             )
-            if self.agent_config.verbose:
-                print(f"🧠 已从本次执行中学习 {len(notes_to_learn)} 条经验")
+            if self.agent_config.verbose and learned > 0:
+                print(f"🧠 已从本次执行中学习 {learned} 条经验")
 
     @property
     def context(self) -> list[dict[str, Any]]:

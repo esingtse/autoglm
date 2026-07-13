@@ -313,7 +313,7 @@ class MemoryManager:
         notes: list[str] | str,
         game: str | None = None,
         source: str = "auto",
-    ) -> None:
+   ) -> None:
         """Learn from a completed task.
 
         Args:
@@ -327,7 +327,7 @@ class MemoryManager:
             game = self._extract_game(task)
 
         if not game:
-            return
+            return 0
 
         kb = self._get_or_create_kb(game)
 
@@ -343,6 +343,7 @@ class MemoryManager:
                 kb.add(entry)
 
         self._save_kb(game, kb)
+        return len(kb.entries)
 
     def learn_manual(
         self,
@@ -455,6 +456,40 @@ class MemoryManager:
                 return game
         return None
 
+    @staticmethod
+    def _is_activity_content(note: str) -> bool:
+        """Check if a note is activity data content that should not be memorized.
+
+        The memory system should store UI navigation knowledge (click positions,
+        icon locations, workflow steps), NOT the crawled activity data itself.
+        Activity data notes are the task output for k2av reporting, not knowledge.
+        """
+        # Activity summary header: === 活动汇总 ===
+        if note.startswith("==="):
+            return True
+
+        # Error messages from model failures
+        if note.startswith("Model error") or note.startswith("Traceback"):
+            return True
+
+        # Task completion summaries
+        if "收集并汇总" in note or "已成功收集" in note:
+            return True
+        if "安全退出" in note and "活动" in note:
+            return True
+
+        # Individual activity block: starts with 【 and contains activity fields
+        activity_fields = ["活动时间", "规则：", "规则:", "奖励：", "奖励:"]
+        if note.startswith("【") and any(f in note for f in activity_fields):
+            return True
+
+        # Summaries containing multiple activity data fields
+        match_count = sum(1 for p in activity_fields if p in note)
+        if match_count >= 2:
+            return True
+
+        return False
+
     def _parse_note_to_entry(
         self, note: str, source: str = "auto"
     ) -> KnowledgeEntry | None:
@@ -466,6 +501,12 @@ class MemoryManager:
         # Skip notes that look like structured event data
         if note.startswith("{") and note.endswith("}"):
             # This is likely a ResultCollector event record, not knowledge
+            return None
+
+        # Skip activity content - memory should only store UI navigation
+        # knowledge (click positions, icon locations, workflow steps),
+       # NOT the crawled activity data itself.
+        if self._is_activity_content(note):
             return None
 
         # Use first line or first 40 chars as key

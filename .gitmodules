@@ -1,0 +1,3 @@
+[submodule "commonproto"]
+	path = commonproto
+	url = git@git.umlife.net:mt-data/commonproto.git

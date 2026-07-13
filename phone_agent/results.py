@@ -340,8 +340,10 @@ def activity_summary_to_game_events(
         title     ← activity title
         content   ← tab label + rules combined
         reward    ← activity reward
-        event_date← normalized YYYY-MM-DD (best effort)
-        ts_crawl  ← current Unix timestamp
+       event_date← normalized YYYY-MM-DD (best effort)
+       ts_crawl  ← current Unix timestamp
+       start_date← normalized start date YYYY-MM-DD
+       end_data  ← normalized end date YYYY-MM-DD
 
     Args:
         text: The Note summary text in ``=== 活动汇总 ===`` format.
@@ -368,8 +370,9 @@ def activity_summary_to_game_events(
 
     results: list[dict[str, object]] = []
     for item in activities:
-        # Normalize event_date to YYYY-MM-DD
-        event_date = _normalize_event_date_for_proto(item.time)
+        # Parse start/end dates from the activity time string
+        start_date, end_date = _normalize_date_range_for_proto(item.time)
+        event_date = end_date or start_date
 
         # content = tab label context + rules
         content_parts = []
@@ -386,57 +389,57 @@ def activity_summary_to_game_events(
             "package": package,
             "app_name": app_name,
             "title": item.title,
-            "content": content,
+           "content": content,
             "reward": item.reward or "无奖励",
-            "event_date": event_date,
+           "event_date": event_date,
+            "start_date": start_date,
+            "end_data": end_date,
             "ts_crawl": now_ts,
         })
 
     return results
 
 
-def _normalize_event_date_for_proto(time_text: str) -> str:
-    """Attempt to normalize a time string to the YYYY-MM-DD proto format.
+def _normalize_date_range_for_proto(time_text: str) -> tuple[str, str]:
+    """Parse a time string into (start_date, end_date) in YYYY-MM-DD format.
 
     Handles common patterns found in game activity time strings:
-    - ``2026/5/29-2026/6/4`` → ``2026-06-04`` (end date)
-    - ``05.29-06.11`` → ``2026-06-11`` (end date)
-    - ``6月1日~6月30日`` → ``2026-06-30``
-    - ``5月27日-6月9日`` → ``2026-06-09``
-    - ``01.01-12.31`` → ``2026-12-31``
-    - ``长期有效`` → ``""``
-    - ``限时招募`` → ``""``
+    - ``2026/5/29-2026/6/4`` → ("2026-05-29", "2026-06-04")
+    - ``05.29-06.11`` → ("2026-05-29", "2026-06-11")
+    - ``6月1日~6月30日`` → ("2026-06-01", "2026-06-30")
+    - ``5月27日-6月9日`` → ("2026-05-27", "2026-06-09")
+    - ``4月18日开启`` → ("2026-04-18", "")
+    - ``长期有效`` / ``限时招募`` → ("", "")
+
+    Returns:
+        (start_date, end_date) tuple, either may be "" if not parseable.
     """
     if not time_text:
-        return ""
+        return "", ""
+
+    import datetime
 
     text = time_text.strip()
+    cy = datetime.datetime.now().year
 
-    # Pattern: YYYY/M/D-YYYY/M/D  or  YYYY-M-D~YYYY-M-D
+    # Pattern: YYYY/M/D-YYYY/M/D  (full range with years)
     m = re.search(
         r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})\s*[-~至到]\s*(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})",
         text,
     )
     if m:
+        sy, sm, sd = int(m.group(1)), int(m.group(2)), int(m.group(3))
         ey, em, ed = int(m.group(4)), int(m.group(5)), int(m.group(6))
-        return f"{ey:04d}-{em:02d}-{ed:02d}"
+        return f"{sy:04d}-{sm:02d}-{sd:02d}", f"{ey:04d}-{em:02d}-{ed:02d}"
 
-    # Pattern: single YYYY/M/D
-    m = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", text)
-    if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return f"{y:04d}-{mo:02d}-{d:02d}"
-
-    # Pattern: M.D-M.D (no year, common Chinese format) e.g. "05.29-06.11"
+    # Pattern: M.D-M.D or M/D-M/D (no year) e.g. "05.29-06.11", "7/10-8/10"
     m = re.search(
-        r"(\d{1,2})\.(\d{1,2})\s*[-~至到]\s*(\d{1,2})\.(\d{1,2})", text
+        r"(\d{1,2})[./](\d{1,2})\s*[-~至到]\s*(\d{1,2})[./](\d{1,2})", text
     )
     if m:
+        sm, sd = int(m.group(1)), int(m.group(2))
         em, ed = int(m.group(3)), int(m.group(4))
-        # Assume current year
-        import datetime
-        cy = datetime.datetime.now().year
-        return f"{cy:04d}-{em:02d}-{ed:02d}"
+        return f"{cy:04d}-{sm:02d}-{sd:02d}", f"{cy:04d}-{em:02d}-{ed:02d}"
 
     # Pattern: M月D日~M月D日 or M月D日-M月D日
     m = re.search(
@@ -444,25 +447,42 @@ def _normalize_event_date_for_proto(time_text: str) -> str:
         text,
     )
     if m:
-        import datetime
-        cy = datetime.datetime.now().year
+        sm, sd = int(m.group(1)), int(m.group(2))
         em, ed = int(m.group(3)), int(m.group(4))
-        return f"{cy:04d}-{em:02d}-{ed:02d}"
+        return f"{cy:04d}-{sm:02d}-{sd:02d}", f"{cy:04d}-{em:02d}-{ed:02d}"
 
-    # Pattern: single "M月D日"
-    m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    # Pattern: single YYYY/M/D
+    m = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", text)
     if m:
-        import datetime
-        cy = datetime.datetime.now().year
-        mo, d = int(m.group(1)), int(m.group(2))
-        return f"{cy:04d}-{mo:02d}-{d:02d}"
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y:04d}-{mo:02d}-{d:02d}", ""
 
     # Pattern: "4月18日开启" — single start date
     m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日.*开启", text)
     if m:
-        import datetime
-        cy = datetime.datetime.now().year
         mo, d = int(m.group(1)), int(m.group(2))
-        return f"{cy:04d}-{mo:02d}-{d:02d}"
+        return f"{cy:04d}-{mo:02d}-{d:02d}", ""
 
-    return ""
+    # Pattern: single "M月D日"
+    m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        return f"{cy:04d}-{mo:02d}-{d:02d}", ""
+
+    # Pattern: single M.D or M/D (no year, no range)
+    m = re.search(r"(\d{1,2})[./](\d{1,2})", text)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        return f"{cy:04d}-{mo:02d}-{d:02d}", ""
+
+    return "", ""
+
+
+def _normalize_event_date_for_proto(time_text: str) -> str:
+    """Return the end date (or start if no end) in YYYY-MM-DD format.
+
+    Thin wrapper around :func:`_normalize_date_range_for_proto` for callers
+    that only need a single date string.
+    """
+    start, end = _normalize_date_range_for_proto(time_text)
+    return end or start
