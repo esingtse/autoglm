@@ -178,9 +178,11 @@ class ActivityItem:
 
     tab_name: str       # 所属标签名称，如 "活动"、"资讯"
     title: str          # 活动名称
-    time: str           # 活动时间
+    time: str           # 活动时间（旧格式：整段范围文本）
     rules: str          # 参与规则
     reward: str         # 奖励内容
+    start_time: str = ""   # 活动起始时间（新格式：单日期）
+    end_time: str = ""     # 活动结束时间（新格式：单日期）
 
 
 def parse_activity_summary(text: str) -> list[ActivityItem]:
@@ -229,6 +231,8 @@ def parse_activity_summary_to_dict(text: str) -> list[dict[str, str]]:
             "time": item.time,
             "rules": item.rules,
             "reward": item.reward,
+            "start_time": item.start_time,
+            "end_time": item.end_time,
         }
         for item in items
     ]
@@ -296,14 +300,35 @@ def _parse_single_activity(block: str) -> ActivityItem | None:
         return None
 
     # Parse key: value fields
-    fields: dict[str, str] = {"time": "", "rules": "", "reward": ""}
+    fields: dict[str, str] = {
+        "time": "",
+        "rules": "",
+        "reward": "",
+        "start_time": "",
+        "end_time": "",
+    }
 
     for line in lines[1:]:
-        # Match "活动时间：xxx", "规则：xxx", "奖励：xxx"
-        for key in ("活动时间", "时间", "规则", "奖励"):
+        # Match "活动时间：xxx", "活动起始时间：xxx", "活动结束时间：xxx",
+        # "规则：xxx", "奖励：xxx". Longer keys are checked first so
+        # "活动起始时间" wins over the "活动时间" prefix.
+        for key in (
+            "活动起始时间",
+            "活动结束时间",
+            "活动开始时间",
+            "活动结束",
+            "活动时间",
+            "时间",
+            "规则",
+            "奖励",
+        ):
             if line.startswith(key + "：") or line.startswith(key + ":"):
                 _, value = re.split(r"[：:]", line, maxsplit=1)
                 mapped_key = {
+                    "活动起始时间": "start_time",
+                    "活动开始时间": "start_time",
+                    "活动结束时间": "end_time",
+                    "活动结束": "end_time",
                     "活动时间": "time",
                     "时间": "time",
                     "规则": "rules",
@@ -318,12 +343,80 @@ def _parse_single_activity(block: str) -> ActivityItem | None:
         time=fields["time"],
         rules=fields["rules"],
         reward=fields["reward"],
+        start_time=fields["start_time"],
+        end_time=fields["end_time"],
     )
 
 
 # ---------------------------------------------------------------------------
 # Proto-compatible (GameEvent) conversion
 # ---------------------------------------------------------------------------
+
+
+def _resolve_package(app_name: str, platform: str) -> str:
+    """Resolve package/bundle name from app name and platform."""
+    from phone_agent.config.apps import get_package_name as get_android_package
+    from phone_agent.config.apps_harmonyos import get_package_name as get_harmony_package
+    from phone_agent.config.apps_ios import get_bundle_id as get_ios_package
+
+    if platform == "ios":
+        return get_ios_package(app_name) or ""
+    if platform == "harmony":
+        return get_harmony_package(app_name) or ""
+    return get_android_package(app_name) or ""
+
+
+def _activity_item_to_event(
+    item: ActivityItem,
+    app_name: str,
+    package: str,
+    now_ts: int,
+    screenshot_path: str | None = None,
+) -> dict[str, object]:
+    """Convert a single parsed ActivityItem to a proto-compatible GameEvent dict.
+
+    Date resolution: if the new per-boundary fields ``start_time`` / ``end_time``
+    are present (single dates from the split Note format), they are normalized
+    directly and win over the legacy combined ``time`` range string. Otherwise
+    the combined ``time`` is parsed as a range via
+    :func:`_normalize_date_range_for_proto` (which now also strips clock-time
+    tokens like `` 00:00``).
+    """
+    if item.start_time or item.end_time:
+        start_date = _normalize_single_date_for_proto(item.start_time)
+        end_date = _normalize_single_date_for_proto(item.end_time)
+    else:
+        start_date, end_date = _normalize_date_range_for_proto(item.time)
+    event_date = end_date or start_date
+
+    content_parts = []
+    if item.tab_name:
+        content_parts.append(f"所属标签: {item.tab_name}")
+    if item.rules:
+        content_parts.append(f"规则: {item.rules}")
+    if item.time:
+        content_parts.append(f"活动时间: {item.time}")
+    if item.start_time and not item.time:
+        content_parts.append(f"活动起始时间: {item.start_time}")
+    if item.end_time and not item.time:
+        content_parts.append(f"活动结束时间: {item.end_time}")
+    content = "; ".join(content_parts) if content_parts else ""
+
+    event = {
+        "app_id": package,
+        "package": package,
+        "app_name": app_name,
+        "title": item.title,
+        "content": content,
+        "reward": item.reward or "无奖励",
+        "event_date": event_date,
+        "start_date": start_date,
+        "end_data": end_date,
+        "ts_crawl": now_ts,
+    }
+    if screenshot_path is not None:
+        event["screenshot"] = screenshot_path
+    return event
 
 
 def activity_summary_to_game_events(
@@ -353,50 +446,49 @@ def activity_summary_to_game_events(
     Returns:
         List of dicts matching the proto GameEvent structure.
     """
-    from phone_agent.config.apps import get_package_name as get_android_package
-    from phone_agent.config.apps_harmonyos import get_package_name as get_harmony_package
-    from phone_agent.config.apps_ios import get_bundle_id as get_ios_package
-
     activities = parse_activity_summary(text)
     now_ts = int(time.time())
+    package = _resolve_package(app_name, platform)
 
-    # Resolve package
-    if platform == "ios":
-        package = get_ios_package(app_name) or ""
-    elif platform == "harmony":
-        package = get_harmony_package(app_name) or ""
-    else:
-        package = get_android_package(app_name) or ""
+    return [
+        _activity_item_to_event(item, app_name, package, now_ts)
+        for item in activities
+    ]
+
+
+def activity_notes_to_game_events(
+    notes: list[dict[str, Any]],
+    app_name: str = "",
+    platform: str = "android",
+) -> list[dict[str, object]]:
+    """Parse per-activity Note records (with screenshot paths) into GameEvents.
+
+    Each note dict has the shape ``{"message": str, "screenshot_path": str | None}``,
+    where ``message`` is a single-activity block (``【标签 - 标题】`` + fields).
+    Non-activity notes (parse to no ActivityItem) are skipped.
+
+    Args:
+        notes: List of ``{message, screenshot_path}`` dicts collected by the agent.
+        app_name: The game/app name (e.g. "和平精英").
+        platform: Platform for package resolution ("android" / "ios" / "harmony").
+
+    Returns:
+        List of GameEvent dicts; each carries a ``screenshot`` path when one was saved.
+    """
+    now_ts = int(time.time())
+    package = _resolve_package(app_name, platform)
 
     results: list[dict[str, object]] = []
-    for item in activities:
-        # Parse start/end dates from the activity time string
-        start_date, end_date = _normalize_date_range_for_proto(item.time)
-        event_date = end_date or start_date
-
-        # content = tab label context + rules
-        content_parts = []
-        if item.tab_name:
-            content_parts.append(f"所属标签: {item.tab_name}")
-        if item.rules:
-            content_parts.append(f"规则: {item.rules}")
-        if item.time:
-            content_parts.append(f"活动时间: {item.time}")
-        content = "; ".join(content_parts) if content_parts else ""
-
-        results.append({
-            "app_id": package,
-            "package": package,
-            "app_name": app_name,
-            "title": item.title,
-           "content": content,
-            "reward": item.reward or "无奖励",
-           "event_date": event_date,
-            "start_date": start_date,
-            "end_data": end_date,
-            "ts_crawl": now_ts,
-        })
-
+    for note in notes:
+        message = note.get("message", "")
+        screenshot_path = note.get("screenshot_path")
+        activities = parse_activity_summary(message)
+        for item in activities:
+            results.append(
+                _activity_item_to_event(
+                    item, app_name, package, now_ts, screenshot_path
+                )
+            )
     return results
 
 
@@ -420,6 +512,11 @@ def _normalize_date_range_for_proto(time_text: str) -> tuple[str, str]:
     import datetime
 
     text = time_text.strip()
+    # Strip clock-time tokens (e.g. " 00:00", " 23:59:30") so date-range
+    # patterns like "07.10-07.30" match even when written as
+    # "07.10 00:00-07.30 23:59". Only the time-of-day is removed; the date
+    # portion is preserved. A leading space is kept so dates don't fuse.
+    text = re.sub(r"\s*\d{1,2}:\d{2}(?::\d{2})?", " ", text)
     cy = datetime.datetime.now().year
 
     # Pattern: YYYY/M/D-YYYY/M/D  (full range with years)
@@ -486,3 +583,14 @@ def _normalize_event_date_for_proto(time_text: str) -> str:
     """
     start, end = _normalize_date_range_for_proto(time_text)
     return end or start
+
+
+def _normalize_single_date_for_proto(text: str) -> str:
+    """Normalize a single date string to YYYY-MM-DD, ignoring any trailing time.
+
+    Used for the new per-boundary Note fields (``活动起始时间`` / ``活动结束时间``),
+    which are single dates but may still carry a clock-time suffix
+    (e.g. ``07.30 23:59``). Returns ``""`` when no date is found.
+    """
+    start, _ = _normalize_date_range_for_proto(text)
+    return start

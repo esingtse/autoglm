@@ -17,6 +17,11 @@ class ActionTimingConfig:
     text_clear_delay: float = 1.0  # Delay after clearing text
     text_input_delay: float = 1.0  # Delay after typing text
     keyboard_restore_delay: float = 1.0  # Delay after restoring original keyboard
+    # Wait for an activity detail page to finish rendering before re-capturing
+    # the screenshot at Note time. The screenshot grabbed at step start may
+    # have caught the page mid-load; by Note time + this delay it has had a
+    # chance to settle, so the saved PNG is not blank.
+    note_screenshot_settle_delay: float = 1.5
 
     def __post_init__(self):
         """Load values from environment variables if present."""
@@ -31,6 +36,12 @@ class ActionTimingConfig:
         )
         self.keyboard_restore_delay = float(
             os.getenv("PHONE_AGENT_KEYBOARD_RESTORE_DELAY", self.keyboard_restore_delay)
+        )
+        self.note_screenshot_settle_delay = float(
+            os.getenv(
+                "PHONE_AGENT_NOTE_SCREENSHOT_SETTLE_DELAY",
+                self.note_screenshot_settle_delay,
+            )
         )
 
 

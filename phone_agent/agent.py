@@ -1,6 +1,10 @@
 """Main PhoneAgent class for orchestrating phone automation."""
 
+import base64
 import json
+import os
+import re
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
@@ -8,12 +12,17 @@ from typing import Any, Callable, TYPE_CHECKING
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import do, finish, parse_action
 from phone_agent.config import get_messages, get_system_prompt
+from phone_agent.config.timing import TIMING_CONFIG
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+from phone_agent.results import parse_activity_summary
 
 if TYPE_CHECKING:
     from phone_agent.memory import MemoryManager
+
+# Characters that are illegal in filenames on Windows — replaced when building screenshot names.
+_INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
 @dataclass
@@ -86,7 +95,9 @@ class PhoneAgent:
         self._step_count = 0
         self.memory_manager = memory_manager
         self._current_task: str = ""
-        self._collected_notes: list[str] = []
+        self._collected_notes: list[dict[str, Any]] = []
+        self._output_dir: str = os.path.join(os.getcwd(), "output")
+        self._activity_seq: int = 0
 
     def run(self, task: str) -> str:
         """
@@ -102,6 +113,7 @@ class PhoneAgent:
         self._step_count = 0
         self._current_task = task
         self._collected_notes = []
+        self._activity_seq = 0
 
         # --- Memory: retrieve knowledge and inject into system prompt ---
         effective_system_prompt = self.agent_config.system_prompt
@@ -157,6 +169,9 @@ class PhoneAgent:
         """Reset the agent state for a new task."""
         self._context = []
         self._step_count = 0
+        self._current_task = ""
+        self._collected_notes = []
+        self._activity_seq = 0
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False
@@ -269,7 +284,22 @@ class PhoneAgent:
         if action.get("action") == "Note":
             note_msg = action.get("message", "")
             if note_msg:
-                self._collected_notes.append(note_msg)
+                # Re-capture the screen right before saving the screenshot.
+                # The `screenshot` captured at the start of this step may have
+                # caught the activity detail page mid-load (blank/empty), since
+                # the model decides to output a Note only after seeing the
+                # fully loaded page. By now (Note time) the page has had time
+                # to settle; wait a short beat, then grab a fresh frame so the
+                # saved PNG reflects the loaded activity.
+                note_screenshot = self._capture_fresh_screenshot(
+                    device_factory
+                ) or screenshot
+                screenshot_path = self._save_activity_screenshot(
+                    note_msg, note_screenshot
+                )
+                self._collected_notes.append(
+                    {"message": note_msg, "screenshot_path": screenshot_path}
+                )
 
         if finished and self.agent_config.verbose:
             msgs = get_messages(self.agent_config.lang)
@@ -296,7 +326,9 @@ class PhoneAgent:
 
         # Collect Note messages captured during execution
         if self._collected_notes:
-            notes_to_learn.extend(self._collected_notes)
+            notes_to_learn.extend(
+                n["message"] for n in self._collected_notes if n.get("message")
+            )
 
         # Also include the finish message if it contains useful info
         if result.message and result.message.strip():
@@ -320,9 +352,72 @@ class PhoneAgent:
         return self._context.copy()
 
     @property
-    def collected_notes(self) -> list[str]:
-        """Get Note messages collected during the current run."""
+    def collected_notes(self) -> list[dict[str, Any]]:
+        """Get Note records collected during the current run.
+
+        Each record is ``{"message": str, "screenshot_path": str | None}`` —
+        the screenshot_path points at a PNG saved at Note time, or None when
+        the note was not a parseable activity block.
+        """
         return list(self._collected_notes)
+
+    def _save_activity_screenshot(self, message: str, screenshot) -> str | None:
+        """Save the current screenshot if the note is an activity block.
+
+        Returns the saved PNG path, or None when the note does not parse to an
+        activity (no 【...】 title) — in which case nothing is written to disk.
+        """
+        activities = parse_activity_summary(message)
+        if not activities:
+            return None
+
+        title = activities[0].title or "untitled"
+        safe_title = _INVALID_FILENAME_CHARS.sub("_", title).strip() or "untitled"
+
+        game = self._extract_game_name()
+        shot_dir = os.path.join(self._output_dir, game, "screenshots")
+        os.makedirs(shot_dir, exist_ok=True)
+
+        self._activity_seq += 1
+        filename = f"{self._activity_seq:03d}_{safe_title}.png"
+        shot_path = os.path.join(shot_dir, filename)
+
+        try:
+            img_data = base64.b64decode(screenshot.base64_data)
+            with open(shot_path, "wb") as f:
+                f.write(img_data)
+        except Exception as e:
+            if self.agent_config.verbose:
+                print(f"⚠️ 截图保存失败: {e}")
+            return None
+
+        if self.agent_config.verbose:
+            print(f"📸 已保存活动截图 → {shot_path}")
+        return shot_path
+
+    def _capture_fresh_screenshot(self, device_factory):
+        """Re-capture a fresh screenshot for Note-time saving.
+
+        Returns a Screenshot, or None on failure. Failure here is non-fatal —
+        the caller falls back to the step-start screenshot.
+        """
+        try:
+            time.sleep(TIMING_CONFIG.action.note_screenshot_settle_delay)
+            return device_factory.get_screenshot(self.agent_config.device_id)
+        except Exception as e:
+            if self.agent_config.verbose:
+                print(f"⚠️ 重新截图失败，使用步骤起始截图: {e}")
+            return None
+
+    def _extract_game_name(self) -> str:
+        """Extract the game name from the current task for path naming."""
+        if not self._current_task:
+            return "unknown"
+        match = re.search(r"《(.+?)》", self._current_task)
+        if match:
+            return match.group(1)
+        safe = _INVALID_FILENAME_CHARS.sub("_", self._current_task).strip()
+        return safe[:20] or "unknown"
 
     @property
     def step_count(self) -> int:
