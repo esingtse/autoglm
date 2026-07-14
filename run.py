@@ -16,7 +16,7 @@ import os
 model_config = ModelConfig(
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
     model_name="gemini-3.5-flash",
-    api_key='',
+    api_key=os.environ.get("GEMINI_API_KEY", ""),
     extra_body={
         "reasoning_effort": "low",   # 关闭思考；也可 "low" / "medium" / "high"
     },
