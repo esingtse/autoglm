@@ -4,22 +4,59 @@ from phone_agent.model import ModelConfig
 from phone_agent.config import get_messages
 from phone_agent.memory import MemoryManager
 from phone_agent.results import activity_notes_to_game_events
+
+# ============================================================
+# prompt 统一从 prompts 包引入（手机配置 + prompt）
+# 原 import 写法（保留注释备用）：
+#   from prompts import TASK_HEPING, PROMPT_XQTD, PROMPT_LKWORLD
+# ============================================================
+from prompts import PHONES
+
+
 from commonproto.pb4.proto.grpc import k2av_pb2
 from commonproto.pb4.proto.ad.ad_pb2 import GameEvent
 from utils.k2av_util import create_k2av_stub, send_k2av
-
 import base64
+
+import argparse
 import json
 import os
 
+# ============================================================
+# 模型配置（原硬编码版本，保留注释备用）
+# ============================================================
 # Gemini
+# model_config = ModelConfig(
+#     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+#     model_name="gemini-3.5-flash",
+#     api_key=os.environ.get("GEMINI_API_KEY", ""),
+#     extra_body={
+#         "reasoning_effort": "low",   # 关闭思考；也可 "low" / "medium" / "high"
+#     },
+# )
+
+# --- 从 run_config.json 读取模型配置（当前使用）---
+def load_run_config() -> dict:
+    """读取 run_config.json；文件不存在或解析失败时返回空配置，使用默认值。"""
+    cfg_path = os.path.join(os.path.dirname(__file__), "run_config.json")
+    if not os.path.isfile(cfg_path):
+        print(f"⚠️ 未找到 {cfg_path}，使用默认模型配置")
+        return {}
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+_run_cfg = load_run_config()
+
 model_config = ModelConfig(
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-    model_name="gemini-3.5-flash",
-    api_key=os.environ.get("GEMINI_API_KEY", ""),
-    extra_body={
-        "reasoning_effort": "low",   # 关闭思考；也可 "low" / "medium" / "high"
-    },
+    base_url=_run_cfg.get(
+        "base_url", "https://generativelanguage.googleapis.com/v1beta/openai/"
+    ),
+    model_name=_run_cfg.get("model_name", "gemini-3.5-flash"),
+    api_key=_run_cfg.get("api_key", ""),
+    extra_body=_run_cfg.get(
+        "extra_body", {"reasoning_effort": "low"}  # 关闭思考；也可 "low" / "medium" / "high"
+    ),
 )
 
 
@@ -32,33 +69,63 @@ agent = PhoneAgent(
     memory_manager=memory,
 )
 
-APP_LIST = ["和平精英", "王者荣耀", "蛋仔派对", "小小蚁国", "完美世界", "三角洲行动"]
-# APP_LIST = [ "蛋仔派对", "小小蚁国", "完美世界", "三角洲行动"]
+# ============================================================
+# 手机配置（原本地定义，保留注释备用；现统一从 prompts 包读取）
+# ============================================================
+# APP_LIST = ["和平精英", "王者荣耀", "蛋仔派对", "小小蚁国", "完美世界", "三角洲行动"]
+# APP_LIST_2 = ["崩坏：星穹铁道", "洛克王国：世界"]
+# PHONE_GAME_LISTS = {1: APP_LIST, 2: APP_LIST_2}
+# GAME_PROMPT_MAPPING = {"崩坏：星穹铁道": PROMPT_XQTD, "洛克王国：世界": PROMPT_LKWORLD}
+#
+# def get_prompt_for_game(game: str) -> str:
+#     """按游戏名取对应 prompt；未配置时回退到通用模板 TASK_HEPING。"""
+#     custom = GAME_PROMPT_MAPPING.get(game)
+#     if custom:
+#         return custom
+#     return TASK_HEPING % game
 
-TASK_HEPING = """
-第一步：在屏幕中找到《%s》游戏图标并点击启动，等待游戏加载完成并进入主屏幕。加载过程中如有任何弹窗、提示框、权限请求或通知出现，自行寻找关闭、跳过、同意或确认按钮将其关闭，不需要请求用户协助，直到完全进入游戏主屏幕为止。如果遇到登录，优先选“QQ登录”
+# --- 命令行参数：选择手机 ---
+_arg_parser = argparse.ArgumentParser(description="手机 Agent 采集脚本")
+_arg_parser.add_argument(
+    "--phone",
+    type=int,
+    default=1,
+    choices=list(PHONES.keys()),
+    help="选择第几部手机（默认 1）",
+)
+_args = _arg_parser.parse_args()
 
-第二步：在屏幕中寻找与"活动"相关的入口，点击进入活动中心页面。
+ACTIVE_PHONE = PHONES[_args.phone]
+ACTIVE_GAME_LIST = ACTIVE_PHONE["games"]
+print(f"📱 当前选择：第 {_args.phone} 部手机，共 {len(ACTIVE_GAME_LIST)} 个游戏")
 
-第三步：进入活动中心后，找到所有一级标签页，逐一点击每个一级标签，收集该标签下的所有内容，包括限时活动、定时开启的固定玩法、副本任务等，不做过滤，全部记录。所有一级标签都必须依次检查，不能跳过。
-
-第四步：在每个含有活动内容的一级标签下，逐个查看所有活动。每进入一个活动的详情页并加载完成后，立即输出一条 Note 记录该活动，格式严格如下：
-
-【一级标签名称 - 活动名称】
-活动起始时间：xxx
-活动结束时间：xxx
-规则：xxx
-奖励：xxx
-
-注意：
-- 每看到一个活动就立刻输出一条独立的 Note，不要把多个活动塞进同一条 Note，也不要等全部看完再统一汇总。
-- 活动起始时间、活动结束时间都要从该活动详情页的实际内容中读取，只写日期（写到日），写不出的填"无"。不要把日期和钟点写成一个范围字符串，分开填到两个字段。例如详情页写"07.10 00:00-07.30 23:59"时，活动起始时间填"07.10 00:00"，活动结束时间填"07.30 23:59"。
-- Note 里的活动名称、规则、奖励都要从该活动详情页的实际内容中读取，未写明的字段填"无"。
-- 同一个活动不要重复输出 Note。
-- 输出 Note 后继续查看下一个活动；列表要从顶部持续向下滚动直到底部，确保所有活动都被加载并记录，不能遗漏。每次滚动后需等待内容加载完成再继续。
-
-第五步：所有一级标签下的活动都逐条 Note 完毕后，结束游戏回到手机桌面，再执行 finish。不要在最后再输出一条汇总 Note。
-""".strip()
+# ============================================================
+# 原 TASK_HEPING 定义（已迁移至 prompts.py，保留注释备用）
+# ============================================================
+# TASK_HEPING = """
+# 第一步：在屏幕中找到《%s》游戏图标并点击启动，等待游戏加载完成并进入主屏幕。加载过程中如有任何弹窗、提示框、权限请求或通知出现，自行寻找关闭、跳过、同意或确认按钮将其关闭，不需要请求用户协助，直到完全进入游戏主屏幕为止。如果遇到登录，优先选"QQ登录"
+#
+# 第二步：在屏幕中寻找与"活动"相关的入口，点击进入活动中心页面。
+#
+# 第三步：进入活动中心后，找到所有一级标签页，逐一点击每个一级标签，收集该标签下的所有内容，包括限时活动、定时开启的固定玩法、副本任务等，不做过滤，全部记录。所有一级标签都必须依次检查，不能跳过。
+#
+# 第四步：在每个含有活动内容的一级标签下，逐个查看所有活动。每进入一个活动的详情页并加载完成后，立即输出一条 Note 记录该活动，格式严格如下：
+#
+# 【一级标签名称 - 活动名称】
+# 活动起始时间：xxx
+# 活动结束时间：xxx
+# 规则：xxx
+# 奖励：xxx
+#
+# 注意：
+# - 每看到一个活动就立刻输出一条独立的 Note，不要把多个活动塞进同一条 Note，也不要等全部看完再统一汇总。
+# - 活动起始时间、活动结束时间都要从该活动详情页的实际内容中读取，只写日期（写到日），写不出的填"无"。不要把日期和钟点写成一个范围字符串，分开填到两个字段。例如详情页写"07.10 00:00-07.30 23:59"时，活动起始时间填"07.10 00:00"，活动结束时间填"07.30 23:59"。
+# - Note 里的活动名称、规则、奖励都要从该活动详情页的实际内容中读取，未写明的字段填"无"。
+# - 同一个活动不要重复输出 Note。
+# - 输出 Note 后继续查看下一个活动；列表要从顶部持续向下滚动直到底部，确保所有活动都被加载并记录，不能遗漏。每次滚动后需等待内容加载完成再继续。
+#
+# 第五步：所有一级标签下的活动都逐条 Note 完毕后，结束游戏回到手机桌面，再执行 finish。不要在最后再输出一条汇总 Note。
+# """.strip()
 
 
 # task = TASK_WANGZHE
@@ -69,8 +136,12 @@ os.makedirs(output_dir, exist_ok=True)
 # --- Create k2av stub once ---
 k2av_stub = create_k2av_stub(server="k2av-ag-alishh.umlife.net:31400", channel_options=[("grpc.default_authority", "k2av.ag.k8s.y.cn")])
 
-for game in APP_LIST:
-    task = TASK_HEPING % game
+# ============================================================
+# 主循环：一次跑完当前选中手机（ACTIVE_GAME_LIST）的所有游戏
+# 原写法：for game in APP_LIST:（第一部手机专用，已改为按 --phone 选择）
+# ============================================================
+for game in ACTIVE_GAME_LIST:
+    task = ACTIVE_PHONE["get_prompt"](game)
     print(f"\n{'='*40}")
     print(f"开始处理: {game}")
     print(f"{'='*40}\n")
