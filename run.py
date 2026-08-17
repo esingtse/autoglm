@@ -1,9 +1,10 @@
-﻿from phone_agent import PhoneAgent
+from phone_agent import PhoneAgent
 from phone_agent.agent import AgentConfig
 from phone_agent.model import ModelConfig
 from phone_agent.config import get_messages
 from phone_agent.memory import MemoryManager
 from phone_agent.results import activity_notes_to_game_events
+from phone_agent.device_factory import get_device_factory
 
 # ============================================================
 # prompt 统一从 prompts 包引入（手机配置 + prompt）
@@ -63,41 +64,24 @@ model_config = ModelConfig(
 # --- Memory: enable knowledge base learning ---
 memory = MemoryManager()
 
-agent = PhoneAgent(
-    model_config=model_config,
-    agent_config=AgentConfig(lang="cn", verbose=True, max_steps=1000),
-    memory_manager=memory,
-)
-
 # ============================================================
-# 手机配置（原本地定义，保留注释备用；现统一从 prompts 包读取）
+# 命令行参数
 # ============================================================
-# APP_LIST = ["和平精英", "王者荣耀", "蛋仔派对", "小小蚁国", "完美世界", "三角洲行动"]
-# APP_LIST_2 = ["崩坏：星穹铁道", "洛克王国：世界"]
-# PHONE_GAME_LISTS = {1: APP_LIST, 2: APP_LIST_2}
-# GAME_PROMPT_MAPPING = {"崩坏：星穹铁道": PROMPT_XQTD, "洛克王国：世界": PROMPT_LKWORLD}
-#
-# def get_prompt_for_game(game: str) -> str:
-#     """按游戏名取对应 prompt；未配置时回退到通用模板 TASK_HEPING。"""
-#     custom = GAME_PROMPT_MAPPING.get(game)
-#     if custom:
-#         return custom
-#     return TASK_HEPING % game
-
-# --- 命令行参数：选择手机 ---
 _arg_parser = argparse.ArgumentParser(description="手机 Agent 采集脚本")
 _arg_parser.add_argument(
     "--phone",
     type=int,
     default=1,
     choices=list(PHONES.keys()),
-    help="选择第几部手机（默认 1）",
+    help="无 devices 配置时回退：选择第几部手机配置（默认 1）",
+)
+_arg_parser.add_argument(
+    "--device",
+    type=str,
+    default=None,
+    help="只跑指定 device_id（默认跑 run_config.json 里 devices 全部）",
 )
 _args = _arg_parser.parse_args()
-
-ACTIVE_PHONE = PHONES[_args.phone]
-ACTIVE_GAME_LIST = ACTIVE_PHONE["games"]
-print(f"📱 当前选择：第 {_args.phone} 部手机，共 {len(ACTIVE_GAME_LIST)} 个游戏")
 
 # ============================================================
 # 原 TASK_HEPING 定义（已迁移至 prompts.py，保留注释备用）
@@ -137,17 +121,51 @@ os.makedirs(output_dir, exist_ok=True)
 k2av_stub = create_k2av_stub(server="k2av-ag-alishh.umlife.net:31400", channel_options=[("grpc.default_authority", "k2av.ag.k8s.y.cn")])
 
 # ============================================================
-# 主循环：一次跑完当前选中手机（ACTIVE_GAME_LIST）的所有游戏
-# 原写法：for game in APP_LIST:（第一部手机专用，已改为按 --phone 选择）
+# 设备映射：物理手机（adb device_id）→ 逻辑配置（prompts/phone0~7）
+# 从 run_config.json 的 devices 读取，串行轮流跑
 # ============================================================
-for game in ACTIVE_GAME_LIST:
-    task = ACTIVE_PHONE["get_prompt"](game)
+_devices = _run_cfg.get("devices", [])
+
+# --- 检测当前实际连接的设备 ---
+_connected_ids = {
+    d.device_id for d in get_device_factory().list_devices() if d.status == "device"
+}
+
+
+def build_device_tasks():
+    """构建待执行的 (device_id, phone_no) 列表。
+
+    - 配置了 devices：按 run_config.json 顺序串行，跳过未连接设备，支持 --device 过滤。
+    - 未配置 devices：回退到 --phone 单设备模式（device_id=None，操作 adb 默认设备）。
+    """
+    if _devices:
+        tasks = []
+        for entry in _devices:
+            device_id = entry.get("device_id")
+            phone_no = entry.get("phone")
+            if phone_no not in PHONES:
+                print(f"⚠️ 未知 phone 编号 {phone_no}（{device_id}），跳过")
+                continue
+            if _args.device and device_id != _args.device:
+                continue
+            if device_id not in _connected_ids:
+                print(f"⚠️ 设备 {device_id} 未连接，跳过")
+                continue
+            tasks.append((device_id, phone_no))
+        return tasks
+    # 回退：单设备（不指定 device_id）
+    return [(None, _args.phone)]
+
+
+def run_one_game(agent, game, phone_cfg, device_output_dir):
+    """在指定设备上跑一个游戏，解析 Note、保存 JSON 并发送 k2av。"""
+    task = phone_cfg["get_prompt"](game)
     print(f"\n{'='*40}")
     print(f"开始处理: {game}")
     print(f"{'='*40}\n")
 
     # --- 清空该游戏目录下旧的截图，避免与新截图混在一起 ---
-    game_shot_dir = os.path.join(output_dir, game, "screenshots")
+    game_shot_dir = os.path.join(device_output_dir, game, "screenshots")
     if os.path.isdir(game_shot_dir):
         for old_name in os.listdir(game_shot_dir):
             if old_name.lower().endswith(".png"):
@@ -172,8 +190,8 @@ for game in ACTIVE_GAME_LIST:
         else:
             print(f"\n⚠️ 无法解析 Note，保留原始文本")
 
-        # Save to output/<game>_activities.json
-        output_path = os.path.join(output_dir, f"{game}_activities.json")
+        # Save to <device_output_dir>/<game>_activities.json
+        output_path = os.path.join(device_output_dir, f"{game}_activities.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(all_events, f, ensure_ascii=False, indent=2)
         print(f"\n💾 已保存 {len(all_events)} 条 GameEvent → {output_path}")
@@ -210,3 +228,39 @@ for game in ACTIVE_GAME_LIST:
     print(f"\n{'='*40}")
     print(f"完成: {game}")
     print(f"{'='*40}\n")
+
+
+# ============================================================
+# 主循环：串行轮流跑每台设备（每台设备跑完它的全部游戏再换下一台）
+# 原写法：for game in ACTIVE_GAME_LIST（单设备，已改为多设备串行）
+# ============================================================
+device_tasks = build_device_tasks()
+
+if not device_tasks:
+    print("⚠️ 没有可执行的设备，请检查 run_config.json 的 devices 配置或 adb 连接")
+else:
+    print(f"📱 共 {len(device_tasks)} 台设备待执行")
+
+for device_id, phone_no in device_tasks:
+    phone_cfg = PHONES[phone_no]
+    game_list = phone_cfg["games"]
+    # 每台设备独立输出目录，避免截图/结果互相覆盖
+    device_output_dir = os.path.join(output_dir, device_id) if device_id else output_dir
+    os.makedirs(device_output_dir, exist_ok=True)
+
+    print(f"\n{'#'*40}")
+    print(f"📱 设备 {device_id or '(默认设备)'} → phone{phone_no}，共 {len(game_list)} 个游戏")
+    print(f"{'#'*40}\n")
+
+    # 每台设备一个独立 Agent（device_id 区分底层 adb 操作）
+    device_agent = PhoneAgent(
+        model_config=model_config,
+        agent_config=AgentConfig(lang="cn", verbose=True, max_steps=1000, device_id=device_id),
+        memory_manager=memory,
+        output_dir=device_output_dir,
+    )
+
+    for game in game_list:
+        run_one_game(device_agent, game, phone_cfg, device_output_dir)
+
+    print(f"\n✅ 设备 {device_id or '(默认设备)'} 全部游戏跑完\n")

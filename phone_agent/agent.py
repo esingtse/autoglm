@@ -80,6 +80,7 @@ class PhoneAgent:
         confirmation_callback: Callable[[str], bool] | None = None,
         takeover_callback: Callable[[str], None] | None = None,
         memory_manager: "MemoryManager | None" = None,
+        output_dir: str | None = None,
     ):
         self.model_config = model_config or ModelConfig()
         self.agent_config = agent_config or AgentConfig()
@@ -96,7 +97,7 @@ class PhoneAgent:
         self.memory_manager = memory_manager
         self._current_task: str = ""
         self._collected_notes: list[dict[str, Any]] = []
-        self._output_dir: str = os.path.join(os.getcwd(), "output")
+        self._output_dir: str = output_dir or os.path.join(os.getcwd(), "output")
         self._activity_seq: int = 0
 
     def run(self, task: str) -> str:
