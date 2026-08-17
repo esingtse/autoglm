@@ -245,6 +245,139 @@ def launch_app(
     return True
 
 
+def get_screen_state(device_id: str | None = None) -> str:
+    """
+    Check whether the screen is on or off.
+
+    Args:
+        device_id: Optional ADB device ID.
+
+    Returns:
+        "on" if the screen is awake, "off" if it is asleep/off.
+    """
+    out = _adb_shell(device_id, ["dumpsys", "power"])
+    if "mWakefulness=Awake" in out:
+        return "on"
+    return "off"
+
+
+def is_locked(device_id: str | None = None) -> bool:
+    """
+    Check whether the device is on the lock screen.
+
+    Args:
+        device_id: Optional ADB device ID.
+
+    Returns:
+        True if the keyguard/lock screen is showing.
+    """
+    out = _adb_shell(device_id, ["dumpsys", "window", "policy"])
+    if not out:
+        return False
+    # 覆盖不同 ROM / Android 版本的锁屏标志：
+    #   mIsShowing             —— KeyguardStateMonitor（小米 HyperOS / MIUI 等）
+    #   isStatusBarKeyguard    —— AOSP 状态栏 keyguard
+    #   mShowingLockscreen     —— 锁屏界面显示
+    #   isKeyguardShowing      —— 部分厂商
+    return any(
+        f"{flag}=true" in out
+        for flag in (
+            "mIsShowing",
+            "isStatusBarKeyguard",
+            "mShowingLockscreen",
+            "isKeyguardShowing",
+        )
+    )
+
+
+def wake_up(device_id: str | None = None, delay: float | None = None) -> None:
+    """
+    Wake up the screen (KEYCODE_WAKEUP). Safe to call even if already awake.
+
+    Args:
+        device_id: Optional ADB device ID.
+        delay: Delay in seconds after the keyevent.
+    """
+    if delay is None:
+        delay = 1.0
+
+    _adb_shell(device_id, ["input", "keyevent", "KEYCODE_WAKEUP"])
+    time.sleep(delay)
+
+
+def dismiss_keyguard(device_id: str | None = None) -> bool:
+    """
+    Dismiss the lock screen with an upward swipe (no password/PIN required).
+
+    Args:
+        device_id: Optional ADB device ID.
+
+    Returns:
+        True if the device is unlocked afterwards, False otherwise.
+    """
+    # Best-effort: some ROMs accept wm dismiss-keyguard; ignore failure.
+    _adb_shell(device_id, ["wm", "dismiss-keyguard"])
+    time.sleep(0.3)
+
+    w, h = _get_screen_size(device_id)
+    start_y = int(h * 0.85)
+    end_y = int(h * 0.2)
+
+    for _ in range(3):
+        swipe(
+            w // 2,
+            start_y,
+            w // 2,
+            end_y,
+            duration_ms=300,
+            device_id=device_id,
+            delay=0.8,
+        )
+        if not is_locked(device_id):
+            return True
+    return False
+
+
+def lock_screen(device_id: str | None = None) -> None:
+    """
+    Lock the screen and turn it off (KEYCODE_SLEEP, fallback KEYCODE_POWER).
+
+    Args:
+        device_id: Optional ADB device ID.
+    """
+    _adb_shell(device_id, ["input", "keyevent", "KEYCODE_SLEEP"])
+    time.sleep(0.5)
+    if get_screen_state(device_id) == "on":
+        _adb_shell(device_id, ["input", "keyevent", "KEYCODE_POWER"])
+        time.sleep(0.5)
+
+
+def _get_screen_size(device_id: str | None) -> tuple[int, int]:
+    """Get the screen resolution, falling back to 1080x2400."""
+    out = _adb_shell(device_id, ["wm", "size"])
+    for token in out.split():
+        if "x" in token:
+            parts = token.split("x")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                return int(parts[0]), int(parts[1])
+    return 1080, 2400
+
+
+def _adb_shell(device_id: str | None, args: list) -> str:
+    """Run an `adb shell` command and return combined stdout/stderr text."""
+    try:
+        result = subprocess.run(
+            _get_adb_prefix(device_id) + ["shell"] + args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    return (result.stdout or "") + (result.stderr or "")
+
+
 def _get_adb_prefix(device_id: str | None) -> list:
     """Get ADB command prefix with optional device specifier."""
     if device_id:

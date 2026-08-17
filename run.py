@@ -22,6 +22,7 @@ import base64
 import argparse
 import json
 import os
+import time
 
 # ============================================================
 # 模型配置（原硬编码版本，保留注释备用）
@@ -230,6 +231,35 @@ def run_one_game(agent, game, phone_cfg, device_output_dir):
     print(f"{'='*40}\n")
 
 
+def prepare_device(device_id):
+    """跑任务前：黑屏则点亮，锁屏则上滑解锁，最后回到桌面。
+
+    保证模型始终从「亮屏 + 桌面」的确定状态开始找游戏图标。
+    """
+    factory = get_device_factory()
+
+    if factory.get_screen_state(device_id) == "off":
+        print(f"🔓 设备 {device_id or '(默认设备)'} 黑屏，点亮中...")
+        factory.wake_up(device_id)
+
+    if factory.is_locked(device_id):
+        print(f"🔓 设备 {device_id or '(默认设备)'} 处于锁屏，上滑解锁...")
+        if factory.dismiss_keyguard(device_id):
+            print("✅ 解锁成功")
+        else:
+            print("⚠️ 解锁失败（可能仍处于锁屏），任务可能无法正常执行")
+
+    # 回到桌面，避免上次残留的游戏页面干扰模型判断
+    factory.home(device_id)
+    time.sleep(1.0)
+
+
+def lock_device(device_id):
+    """跑完任务后锁屏熄屏，节约用电。"""
+    print(f"🔒 设备 {device_id or '(默认设备)'} 锁屏熄屏")
+    get_device_factory().lock_screen(device_id)
+
+
 # ============================================================
 # 主循环：串行轮流跑每台设备（每台设备跑完它的全部游戏再换下一台）
 # 原写法：for game in ACTIVE_GAME_LIST（单设备，已改为多设备串行）
@@ -260,7 +290,14 @@ for device_id, phone_no in device_tasks:
         output_dir=device_output_dir,
     )
 
-    for game in game_list:
-        run_one_game(device_agent, game, phone_cfg, device_output_dir)
+    # 跑任务前：确认屏幕状态，黑屏则点亮、锁屏则上滑解锁，回到桌面
+    prepare_device(device_id)
+
+    try:
+        for game in game_list:
+            run_one_game(device_agent, game, phone_cfg, device_output_dir)
+    finally:
+        # 跑完（无论成功失败）锁屏熄屏，节约用电
+        lock_device(device_id)
 
     print(f"\n✅ 设备 {device_id or '(默认设备)'} 全部游戏跑完\n")

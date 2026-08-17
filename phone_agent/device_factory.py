@@ -105,6 +105,26 @@ class DeviceFactory:
         """Launch an app."""
         return self.module.launch_app(app_name, device_id, delay)
 
+    def get_screen_state(self, device_id: str | None = None) -> str:
+        """Check whether the screen is on or off."""
+        return self.module.get_screen_state(device_id)
+
+    def is_locked(self, device_id: str | None = None) -> bool:
+        """Check whether the device is on the lock screen."""
+        return self.module.is_locked(device_id)
+
+    def wake_up(self, device_id: str | None = None, delay: float | None = None):
+        """Wake up the screen."""
+        return self.module.wake_up(device_id, delay)
+
+    def dismiss_keyguard(self, device_id: str | None = None) -> bool:
+        """Dismiss the lock screen (swipe up)."""
+        return self.module.dismiss_keyguard(device_id)
+
+    def lock_screen(self, device_id: str | None = None):
+        """Lock the screen and turn it off."""
+        return self.module.lock_screen(device_id)
+
     def type_text(self, text: str, device_id: str | None = None):
         """Type text."""
         return self.module.type_text(text, device_id)

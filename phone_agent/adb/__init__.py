@@ -9,13 +9,18 @@ from phone_agent.adb.connection import (
 )
 from phone_agent.adb.device import (
     back,
+    dismiss_keyguard,
     double_tap,
     get_current_app,
+    get_screen_state,
     home,
+    is_locked,
     launch_app,
+    lock_screen,
     long_press,
     swipe,
     tap,
+    wake_up,
 )
 from phone_agent.adb.input import (
     clear_text,
@@ -35,6 +40,11 @@ __all__ = [
     "restore_keyboard",
     # Device control
     "get_current_app",
+    "get_screen_state",
+    "is_locked",
+    "wake_up",
+    "dismiss_keyguard",
+    "lock_screen",
     "tap",
     "swipe",
     "back",
